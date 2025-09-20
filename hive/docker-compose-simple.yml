@@ -1,0 +1,165 @@
+version: '3.8'
+
+services:
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: hive-redis
+    ports:
+      - "6380:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # PostgreSQL for persistent storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: hive-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: hive
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivedb123}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # Ollama for AI capabilities (using existing local installation)
+  # Since Ollama is already running locally on port 11434, we'll use host network
+
+  # Simple orchestrator using existing code
+  orchestrator:
+    image: node:18-alpine
+    container_name: hive-orchestrator
+    working_dir: /app
+    ports:
+      - "9190:9090"
+      - "9192:9092"
+    environment:
+      NODE_ENV: production
+      REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivedb123}
+      POSTGRES_DB: hive
+      OLLAMA_URL: http://host.docker.internal:11434
+      LOG_LEVEL: info
+    volumes:
+      - ./orchestrator.js:/app/orchestrator.js:ro
+      - ./orchestrator-logged.js:/app/orchestrator-logged.js:ro
+      - ./logger.js:/app/logger.js:ro
+      - ./hive.config.json:/app/hive.config.json:ro
+      - ./configs:/app/configs:ro
+      - ./logs:/app/logs
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+    command: sh -c "npm install && node orchestrator-logged.js"
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - hive-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Backend Agent
+  backend-agent:
+    image: node:18-alpine
+    container_name: hive-backend-agent
+    working_dir: /app
+    environment:
+      AGENT_TYPE: backend
+      REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivedb123}
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      OLLAMA_URL: http://host.docker.internal:11434
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./logger.js:/app/logger.js:ro
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+    command: sh -c "npm install && node agents/backend.agent.js"
+    depends_on:
+      - orchestrator
+    networks:
+      - hive-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # SEO AI Agent  
+  seo-agent:
+    image: node:18-alpine
+    container_name: hive-seo-agent
+    working_dir: /app
+    environment:
+      AGENT_TYPE: seo
+      REDIS_HOST: redis
+      POSTGRES_HOST: postgres
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      OLLAMA_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: llama3.2:1b
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+      - ./logger.js:/app/logger.js:ro
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+    command: sh -c "npm install && node agents/seo-ai-optimizer.agent.js"
+    depends_on:
+      - orchestrator
+    networks:
+      - hive-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Frontend Agent
+  frontend-agent:
+    image: node:18-alpine
+    container_name: hive-frontend-agent
+    working_dir: /app
+    environment:
+      AGENT_TYPE: frontend
+      REDIS_HOST: redis
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      OLLAMA_URL: http://host.docker.internal:11434
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./logger.js:/app/logger.js:ro
+      - ./package.json:/app/package.json:ro
+      - ./package-lock.json:/app/package-lock.json:ro
+    command: sh -c "npm install && node agents/frontend.agent.js"
+    depends_on:
+      - orchestrator
+    networks:
+      - hive-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  redis-data:
+  postgres-data:
+
+networks:
+  hive-network:
+    driver: bridge

@@ -1,0 +1,29 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Copy application code
+COPY orchestrator*.js ./
+COPY core/ ./core/
+COPY services/ ./services/
+COPY configs/ ./configs/
+COPY dashboard/ ./dashboard/
+
+# Create necessary directories
+RUN mkdir -p logs
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:9090/health', (r) => {r.statusCode === 200 ? process.exit(0) : process.exit(1)})"
+
+# Run as non-root user
+RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
+USER nodejs
+
+EXPOSE 9090 9092
+
+CMD ["node", "orchestrator.js"]

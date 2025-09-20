@@ -1,0 +1,186 @@
+{
+  "name": "Ultimate SEO Platform Hive",
+  "version": "1.0.0",
+  "description": "Distributed development and deployment system for SEO Management Platform",
+  "coordinator": {
+    "host": "31.97.222.218",
+    "port": 9090,
+    "protocol": "https",
+    "domain": "hive.theprofitplatform.com.au"
+  },
+  "agents": {
+    "frontend": {
+      "id": "agent-frontend",
+      "type": "development",
+      "specialization": "Next.js, React, TypeScript, MUI",
+      "responsibilities": [
+        "UI component development",
+        "State management implementation",
+        "Real-time SSE integration",
+        "Dashboard creation",
+        "Responsive design"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "4GB",
+        "storage": "20GB"
+      }
+    },
+    "backend": {
+      "id": "agent-backend",
+      "type": "development",
+      "specialization": "Node.js, Express, PostgreSQL, Redis",
+      "responsibilities": [
+        "API development",
+        "Database operations",
+        "Authentication system",
+        "Google API integration",
+        "Background job processing"
+      ],
+      "resources": {
+        "cpu": 4,
+        "memory": "8GB",
+        "storage": "50GB"
+      }
+    },
+    "database": {
+      "id": "agent-database",
+      "type": "infrastructure",
+      "specialization": "PostgreSQL, Redis, Data Architecture",
+      "responsibilities": [
+        "Schema design",
+        "Migration management",
+        "Performance optimization",
+        "Backup automation",
+        "Row-level security"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "16GB",
+        "storage": "100GB"
+      }
+    },
+    "devops": {
+      "id": "agent-devops",
+      "type": "infrastructure",
+      "specialization": "Docker, Nginx, CI/CD, Monitoring",
+      "responsibilities": [
+        "Container orchestration",
+        "Deployment automation",
+        "SSL management",
+        "Performance monitoring",
+        "Security hardening"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "4GB",
+        "storage": "30GB"
+      }
+    },
+    "testing": {
+      "id": "agent-testing",
+      "type": "quality",
+      "specialization": "Jest, Playwright, k6, Security Testing",
+      "responsibilities": [
+        "Unit test creation",
+        "Integration testing",
+        "E2E test automation",
+        "Performance testing",
+        "Security scanning"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "4GB",
+        "storage": "10GB"
+      }
+    },
+    "integration": {
+      "id": "agent-integration",
+      "type": "development",
+      "specialization": "Google APIs, OAuth, N8N, Webhooks",
+      "responsibilities": [
+        "Google Workspace integration",
+        "OAuth implementation",
+        "N8N workflow setup",
+        "Third-party API connections",
+        "Webhook management"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "4GB",
+        "storage": "10GB"
+      }
+    }
+  },
+  "workflows": {
+    "development": {
+      "phases": [
+        {
+          "name": "foundation",
+          "duration": "2 weeks",
+          "agents": ["backend", "database", "devops"],
+          "parallel": true
+        },
+        {
+          "name": "core-features",
+          "duration": "4 weeks",
+          "agents": ["frontend", "backend", "integration"],
+          "parallel": true
+        },
+        {
+          "name": "advanced-features",
+          "duration": "4 weeks",
+          "agents": ["frontend", "backend", "integration", "testing"],
+          "parallel": true
+        },
+        {
+          "name": "polish",
+          "duration": "2 weeks",
+          "agents": ["testing", "devops", "frontend"],
+          "parallel": false
+        }
+      ]
+    },
+    "deployment": {
+      "stages": [
+        "pre-deployment-checks",
+        "database-migration",
+        "backend-deployment",
+        "frontend-deployment",
+        "ssl-configuration",
+        "health-checks",
+        "monitoring-setup"
+      ]
+    }
+  },
+  "communication": {
+    "protocol": "websocket",
+    "messageQueue": "redis",
+    "channels": {
+      "tasks": "hive:tasks",
+      "status": "hive:status",
+      "logs": "hive:logs",
+      "alerts": "hive:alerts"
+    }
+  },
+  "monitoring": {
+    "metrics": [
+      "task_completion_rate",
+      "agent_utilization",
+      "error_rate",
+      "deployment_success_rate",
+      "test_coverage"
+    ],
+    "dashboardUrl": "https://dashboard.theprofitplatform.com.au/hive",
+    "alerting": {
+      "email": "admin@theprofitplatform.com.au",
+      "webhook": "https://n8n.theprofitplatform.com.au/webhook/hive-alerts"
+    }
+  },
+  "storage": {
+    "codeRepository": "github.com/theprofitplatform/ultimate",
+    "artifactStorage": "/home/avi/projects/ultimate/artifacts",
+    "logsDirectory": "/home/avi/projects/ultimate/logs",
+    "backupLocation": "/root/backups/ultimate"
+  }
+}

@@ -1,0 +1,470 @@
+# Product Design Review (PDR) - SEO Management Platform
+## Ultimate Project - theprofitplatform.com.au
+
+---
+
+## 1. EXECUTIVE SUMMARY
+
+### Project Name
+SEO Management Web Application - Ultimate Platform
+
+### Version
+1.0.0
+
+### Review Date
+2025-09-08
+
+### Product Owner
+The Profit Platform (theprofitplatform.com.au)
+
+### Development Environment
+- **Primary Server**: Hostinger VPS (31.97.222.218)
+- **OS**: Ubuntu 24.04.3 LTS
+- **Domains**: 
+  - Production: seo.theprofitplatform.com.au
+  - Testing: test.theprofitplatform.com.au
+  - N8N: n8n.theprofitplatform.com.au
+  - Dashboard: dashboard.theprofitplatform.com.au
+
+---
+
+## 2. PRODUCT OVERVIEW
+
+### 2.1 Vision Statement
+Build a comprehensive, multi-tenant SEO management platform that integrates seamlessly with Google Workspace, providing real-time analytics, automated reporting, and intelligent workflow automation.
+
+### 2.2 Key Objectives
+- **Multi-tenant Architecture**: Support multiple organizations with isolated data
+- **Google Integration**: Full OAuth 2.0 integration with Drive, Sheets, Analytics
+- **Real-time Analytics**: Live dashboard with SSE updates
+- **Automated Workflows**: N8N integration for task automation
+- **Enterprise Security**: JWT authentication, row-level security, encrypted credentials
+
+### 2.3 Success Metrics
+- System uptime: 99.9%
+- API response time: <200ms for 95% of requests
+- User onboarding: <5 minutes
+- Data refresh rate: Real-time for critical metrics
+- Security compliance: SOC 2 Type II ready
+
+---
+
+## 3. TECHNICAL ARCHITECTURE
+
+### 3.1 Technology Stack
+
+#### Frontend
+- **Framework**: Next.js 14 with TypeScript
+- **State Management**: Zustand (client), React Query (server)
+- **UI Components**: Material-UI (MUI) with custom theming
+- **Charts**: ApexCharts (advanced), Recharts (simple)
+- **Real-time**: Server-Sent Events (SSE)
+
+#### Backend
+- **Runtime**: Node.js with Express/Fastify
+- **Database**: PostgreSQL with row-level security
+- **Caching**: Redis for sessions and data cache
+- **Queue**: Bull/BullMQ with Redis
+- **Authentication**: JWT with refresh tokens (HttpOnly cookies)
+
+#### Infrastructure
+- **Container**: Docker with docker-compose
+- **Process Manager**: PM2 for Node.js services
+- **Web Server**: Nginx with SSL (Let's Encrypt)
+- **Monitoring**: Custom dashboard + automation framework
+- **CI/CD**: GitHub Actions self-hosted runner
+
+### 3.2 System Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         Client Layer                         │
+├─────────────────────────────────────────────────────────────┤
+│  Next.js Frontend (seo.theprofitplatform.com.au)           │
+│  - React Components                                          │
+│  - MUI Design System                                         │
+│  - Real-time SSE Updates                                     │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ HTTPS
+┌──────────────────────▼──────────────────────────────────────┐
+│                    API Gateway (Nginx)                       │
+│  - Load Balancing                                           │
+│  - SSL Termination                                          │
+│  - Rate Limiting                                            │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────┐
+│                  Application Layer                           │
+├─────────────────────────────────────────────────────────────┤
+│  Express/Fastify API Server                                 │
+│  - Authentication Middleware                                 │
+│  - Tenant Isolation                                         │
+│  - Business Logic Services                                  │
+│  - Google API Integration                                   │
+└────────┬──────────────────────────────┬─────────────────────┘
+         │                              │
+┌────────▼────────┐            ┌───────▼────────┐
+│   PostgreSQL    │            │     Redis       │
+│   - Multi-tenant│            │   - Sessions    │
+│   - RLS Enabled │            │   - Cache       │
+│   - Partitioned │            │   - Job Queue   │
+└─────────────────┘            └─────────────────┘
+```
+
+---
+
+## 4. DATABASE DESIGN
+
+### 4.1 Multi-Tenant Strategy
+- **Approach**: Single database with row-level security (RLS)
+- **Isolation**: PostgreSQL RLS policies per tenant
+- **Partitioning**: Time-series data partitioned monthly
+- **Backup**: Automated daily backups with 30-day retention
+
+### 4.2 Core Tables
+
+#### Tenants
+- `id`: UUID (Primary Key)
+- `name`: Organization name
+- `domain`: Unique domain
+- `google_credentials`: Encrypted OAuth tokens
+- `subscription_tier`: Plan level
+- Timestamps
+
+#### Users & Permissions
+- Many-to-many relationship with tenants
+- Role-based access control (RBAC)
+- Granular permissions via JSONB
+
+#### SEO Data Tables
+- `seo_keywords`: Keyword tracking with partitioning
+- `keyword_rankings`: Time-series ranking data
+- `backlinks`: Link profile management
+- `traffic_metrics`: Google Analytics integration
+- `report_templates`: Custom report configurations
+
+### 4.3 Performance Optimizations
+- Strategic indexes on foreign keys and search columns
+- Table partitioning for time-series data
+- Connection pooling with PgBouncer
+- Query optimization with EXPLAIN ANALYZE
+
+---
+
+## 5. GOOGLE WORKSPACE INTEGRATION
+
+### 5.1 OAuth 2.0 Implementation
+- **Scopes**: Drive, Sheets, Analytics (read/write as needed)
+- **Token Storage**: AES-256-GCM encryption
+- **Auto-refresh**: Token refresh before expiry
+- **State Validation**: Redis-based CSRF protection
+
+### 5.2 API Services
+
+#### Google Drive
+- List files and folders
+- Watch for file changes via webhooks
+- Read file metadata
+- Maintain folder hierarchy
+
+#### Google Sheets
+- Batch read/write operations
+- Real-time data synchronization
+- Rate limiting (300 requests/minute)
+- Cell formatting preservation
+
+#### Google Analytics
+- Traffic data import
+- Goal conversion tracking
+- Custom dimension mapping
+- Real-time reporting API
+
+### 5.3 Rate Limiting Strategy
+- Per-tenant rate limits
+- Exponential backoff
+- Request queuing with Bull
+- Priority-based processing
+
+---
+
+## 6. SECURITY DESIGN
+
+### 6.1 Authentication Flow
+```
+User Login → Validate Credentials → Generate JWT (15min)
+           → Issue Refresh Token (7 days, HttpOnly cookie)
+           → Store Session in Redis
+           → Return Access Token
+```
+
+### 6.2 Security Measures
+
+#### Application Security
+- JWT with short expiry (15 minutes)
+- Refresh tokens in HttpOnly cookies
+- CSRF protection with double-submit cookies
+- XSS prevention via Content Security Policy
+- SQL injection prevention via parameterized queries
+
+#### Infrastructure Security
+- SSL/TLS everywhere (Let's Encrypt)
+- Firewall rules (UFW)
+- SSH key-only access
+- Regular security updates
+- Audit logging for compliance
+
+#### Data Security
+- Encryption at rest (PostgreSQL)
+- Encryption in transit (TLS 1.3)
+- Credential encryption (AES-256-GCM)
+- PII data masking in logs
+- GDPR compliance ready
+
+### 6.3 Compliance
+- Audit trail for all data modifications
+- Data retention policies
+- Right to deletion implementation
+- Data export capabilities
+- Privacy policy integration
+
+---
+
+## 7. USER INTERFACE DESIGN
+
+### 7.1 Design Principles
+- **Responsive**: Mobile-first design
+- **Accessible**: WCAG 2.1 AA compliance
+- **Performant**: <3s initial load, <100ms interactions
+- **Consistent**: MUI design system
+- **Intuitive**: Progressive disclosure
+
+### 7.2 Key Features
+
+#### Dashboard
+- Real-time metrics display
+- Customizable widgets
+- Drag-and-drop layout
+- Export capabilities
+
+#### Keyword Management
+- Bulk import/export
+- Advanced filtering
+- Inline editing
+- Historical trends
+
+#### Reporting
+- Template-based reports
+- Scheduled delivery
+- PDF/Excel export
+- White-label options
+
+#### Settings
+- Team management
+- API credentials
+- Notification preferences
+- Billing management
+
+---
+
+## 8. PERFORMANCE REQUIREMENTS
+
+### 8.1 Response Times
+- API endpoints: <200ms (p95)
+- Dashboard load: <3 seconds
+- Report generation: <10 seconds
+- Bulk operations: Progress indication
+
+### 8.2 Scalability
+- Horizontal scaling via load balancer
+- Database read replicas
+- CDN for static assets
+- Microservices architecture ready
+
+### 8.3 Availability
+- 99.9% uptime SLA
+- Automated failover
+- Health check monitoring
+- Graceful degradation
+
+---
+
+## 9. TESTING STRATEGY
+
+### 9.1 Test Coverage
+- Unit tests: >80% coverage
+- Integration tests: API endpoints
+- E2E tests: Critical user flows
+- Performance tests: Load testing
+
+### 9.2 Testing Tools
+- **Unit**: Jest with React Testing Library
+- **Integration**: Supertest
+- **E2E**: Playwright
+- **Performance**: k6
+- **Security**: OWASP ZAP
+
+### 9.3 CI/CD Pipeline
+```yaml
+Pipeline:
+  1. Code Push → GitHub
+  2. Run Tests (Jest, Playwright)
+  3. Security Scan (Snyk)
+  4. Build Docker Image
+  5. Deploy to Staging
+  6. Run E2E Tests
+  7. Deploy to Production
+  8. Health Check
+```
+
+---
+
+## 10. DEPLOYMENT PLAN
+
+### 10.1 Infrastructure Setup
+- **VPS Configuration**: Already complete
+- **Domain Setup**: DNS configured
+- **SSL Certificates**: Auto-renewal via certbot
+- **Monitoring**: Custom automation framework
+
+### 10.2 Deployment Steps
+1. Database migration and seeding
+2. Redis and queue setup
+3. Backend API deployment
+4. Frontend build and deployment
+5. Nginx configuration
+6. SSL certificate generation
+7. Health check verification
+8. Monitoring setup
+
+### 10.3 Rollback Strategy
+- Blue-green deployment
+- Database migration rollback scripts
+- Previous version Docker images
+- Automated rollback on health check failure
+
+---
+
+## 11. MONITORING & MAINTENANCE
+
+### 11.1 Monitoring Stack
+- **Application**: Custom dashboard at `/root/automation/dashboard/`
+- **Infrastructure**: System metrics via automation framework
+- **Logs**: Centralized logging with rotation
+- **Alerts**: Email notifications for critical events
+
+### 11.2 Maintenance Tasks
+- Daily: Backup, log rotation, security scan
+- Weekly: Performance review, update check
+- Monthly: Security patches, capacity planning
+- Quarterly: Disaster recovery test
+
+---
+
+## 12. RISK ASSESSMENT
+
+### 12.1 Technical Risks
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| API Rate Limits | HIGH | Implement queuing and caching |
+| Data Loss | CRITICAL | Daily backups, replication |
+| Security Breach | CRITICAL | Multi-layer security, auditing |
+| Performance Degradation | MEDIUM | Monitoring, auto-scaling |
+| Third-party Service Outage | MEDIUM | Graceful degradation, fallbacks |
+
+### 12.2 Business Risks
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Compliance Violation | HIGH | Audit trails, data governance |
+| Customer Data Leak | CRITICAL | Encryption, access controls |
+| Service Downtime | HIGH | HA architecture, SLA monitoring |
+| Scaling Issues | MEDIUM | Cloud-ready architecture |
+
+---
+
+## 13. PROJECT TIMELINE
+
+### Phase 1: Foundation (Weeks 1-2)
+- Database setup and migrations
+- Authentication system
+- Basic API structure
+- CI/CD pipeline
+
+### Phase 2: Core Features (Weeks 3-6)
+- Google OAuth integration
+- Keyword management
+- Dashboard development
+- Real-time updates
+
+### Phase 3: Advanced Features (Weeks 7-10)
+- Reporting system
+- N8N workflow integration
+- Advanced analytics
+- Bulk operations
+
+### Phase 4: Polish & Launch (Weeks 11-12)
+- Performance optimization
+- Security hardening
+- Documentation
+- Production deployment
+
+---
+
+## 14. BUDGET CONSIDERATIONS
+
+### 14.1 Infrastructure Costs
+- VPS Hosting: Existing Hostinger plan
+- Domain & SSL: Included
+- Backup Storage: $10/month
+- CDN: $20/month (optional)
+
+### 14.2 Third-party Services
+- Google APIs: Free tier initially
+- Email Service: $10/month
+- Monitoring: Custom solution (free)
+- Total: ~$40/month
+
+---
+
+## 15. APPROVAL & SIGN-OFF
+
+### Review Committee
+- Product Owner: ________________
+- Technical Lead: ________________
+- Security Officer: ________________
+- QA Lead: ________________
+
+### Approval Status
+- [ ] Technical Architecture Approved
+- [ ] Security Design Approved
+- [ ] Database Design Approved
+- [ ] UI/UX Design Approved
+- [ ] Testing Strategy Approved
+- [ ] Deployment Plan Approved
+
+### Final Approval
+Date: ________________
+Signature: ________________
+
+---
+
+## APPENDICES
+
+### A. API Documentation Link
+- To be generated via Swagger/OpenAPI
+
+### B. Database Schema Diagrams
+- ERD available in `/docs/database/`
+
+### C. Security Audit Checklist
+- OWASP Top 10 compliance checklist
+
+### D. Performance Benchmarks
+- Baseline metrics for comparison
+
+### E. Disaster Recovery Plan
+- Detailed DR procedures
+
+---
+
+*End of Product Design Review Document*
+*Version 1.0.0 - 2025-09-08*

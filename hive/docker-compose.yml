@@ -1,0 +1,408 @@
+version: '3.8'
+
+services:
+  # Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: hive-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: hive
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-hivepass123}
+      RABBITMQ_DEFAULT_VHOST: hive
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./configs/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: hive-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # PostgreSQL for persistent storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: hive-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: hive
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hivedb123}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # Elasticsearch for logs and search
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: hive-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # Kibana for log visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: hive-kibana
+    ports:
+      - "5601:5601"
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    depends_on:
+      - elasticsearch
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hive-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - hive-network
+
+  # Grafana for metrics dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: hive-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_INSTALL_PLUGINS: redis-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./configs/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - hive-network
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: hive-jaeger
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    environment:
+      COLLECTOR_ZIPKIN_HOST_PORT: 9411
+      COLLECTOR_OTLP_ENABLED: true
+    networks:
+      - hive-network
+
+  # Ollama for AI capabilities
+  ollama:
+    image: ollama/ollama:latest
+    container_name: hive-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - hive-network
+
+  # Nginx reverse proxy with rate limiting
+  nginx:
+    image: nginx:alpine
+    container_name: hive-nginx
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./configs/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/ssl:/etc/nginx/ssl:ro
+      - ./dashboard:/usr/share/nginx/html:ro
+    depends_on:
+      - orchestrator
+    networks:
+      - hive-network
+
+  # Enhanced Orchestrator
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: hive-orchestrator
+    ports:
+      - "9090:9090"
+      - "9092:9092"
+    environment:
+      NODE_ENV: production
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      POSTGRES_URL: postgres://hive:${POSTGRES_PASSWORD:-hivedb123}@postgres:5432/hive
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+      LOG_LEVEL: info
+    volumes:
+      - ./configs:/app/configs:ro
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+      - rabbitmq
+      - postgres
+      - elasticsearch
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - hive-network
+
+  # Backend Agent
+  backend-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: hive-backend-agent
+    environment:
+      AGENT_TYPE: backend
+      AGENT_ID: agent-backend-001
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      OLLAMA_URL: http://ollama:11434
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+    depends_on:
+      - orchestrator
+      - ollama
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    networks:
+      - hive-network
+
+  # Frontend Agent
+  frontend-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: hive-frontend-agent
+    environment:
+      AGENT_TYPE: frontend
+      AGENT_ID: agent-frontend-001
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      OLLAMA_URL: http://ollama:11434
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+    depends_on:
+      - orchestrator
+      - ollama
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    networks:
+      - hive-network
+
+  # SEO AI Agent
+  seo-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: hive-seo-agent
+    environment:
+      AGENT_TYPE: seo
+      AGENT_ID: agent-seo-ai-001
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: llama3.2:1b
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+    depends_on:
+      - orchestrator
+      - ollama
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    networks:
+      - hive-network
+
+  # Database Agent
+  database-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: hive-database-agent
+    environment:
+      AGENT_TYPE: database
+      AGENT_ID: agent-database-001
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      POSTGRES_URL: postgres://hive:${POSTGRES_PASSWORD:-hivedb123}@postgres:5432/hive
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+    depends_on:
+      - orchestrator
+      - postgres
+    networks:
+      - hive-network
+
+  # Testing Agent
+  testing-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: hive-testing-agent
+    environment:
+      AGENT_TYPE: testing
+      AGENT_ID: agent-testing-001
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+      - ./tests:/app/tests
+    depends_on:
+      - orchestrator
+    networks:
+      - hive-network
+
+  # DevOps Agent
+  devops-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: hive-devops-agent
+    environment:
+      AGENT_TYPE: devops
+      AGENT_ID: agent-devops-001
+      REDIS_HOST: redis
+      RABBITMQ_URL: amqp://hive:${RABBITMQ_PASSWORD:-hivepass123}@rabbitmq:5672/hive
+      ORCHESTRATOR_URL: http://orchestrator:9090
+      ORCHESTRATOR_WS_URL: ws://orchestrator:9092
+      JAEGER_ENDPOINT: http://jaeger:14268/api/traces
+    volumes:
+      - ./agents:/app/agents:ro
+      - ./core:/app/core:ro
+      - ./services:/app/services:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - orchestrator
+    networks:
+      - hive-network
+
+volumes:
+  rabbitmq-data:
+  redis-data:
+  postgres-data:
+  elasticsearch-data:
+  prometheus-data:
+  grafana-data:
+  ollama-data:
+
+networks:
+  hive-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

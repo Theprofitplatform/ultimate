@@ -1,0 +1,214 @@
+{
+  "name": "Hive Test Spawn",
+  "version": "1.0.0-test",
+  "description": "Test instance of Hive multi-agent system with claude-flow architecture",
+  "spawn": {
+    "id": "test-spawn-001",
+    "type": "development",
+    "namespace": "hive-test",
+    "environment": "test"
+  },
+  "coordinator": {
+    "host": "localhost",
+    "port": 9093,
+    "protocol": "http",
+    "wsPort": 9094
+  },
+  "communication": {
+    "protocol": "claude-flow",
+    "messageQueue": "redis",
+    "channels": {
+      "tasks": "hive-test:tasks",
+      "status": "hive-test:status",
+      "logs": "hive-test:logs",
+      "alerts": "hive-test:alerts",
+      "coordination": "hive-test:coordination"
+    },
+    "patterns": {
+      "consensus": true,
+      "broadcast": true,
+      "directMessage": true,
+      "pubSub": true,
+      "requestResponse": true
+    }
+  },
+  "agents": {
+    "coordinator": {
+      "id": "test-coordinator",
+      "type": "coordination",
+      "specialization": "Task orchestration, Agent management, Flow control",
+      "capabilities": [
+        "task-distribution",
+        "agent-monitoring",
+        "consensus-coordination",
+        "workflow-management",
+        "resource-allocation"
+      ],
+      "resources": {
+        "cpu": 1,
+        "memory": "2GB",
+        "storage": "5GB"
+      }
+    },
+    "analyst": {
+      "id": "test-analyst",
+      "type": "analysis",
+      "specialization": "Data analysis, Pattern recognition, Problem solving",
+      "capabilities": [
+        "data-analysis",
+        "pattern-recognition",
+        "problem-decomposition",
+        "solution-synthesis",
+        "performance-analysis"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "4GB",
+        "storage": "10GB"
+      }
+    },
+    "executor": {
+      "id": "test-executor",
+      "type": "execution",
+      "specialization": "Task execution, Implementation, System operations",
+      "capabilities": [
+        "task-execution",
+        "code-implementation",
+        "system-operations",
+        "file-operations",
+        "command-execution"
+      ],
+      "resources": {
+        "cpu": 2,
+        "memory": "4GB",
+        "storage": "20GB"
+      }
+    },
+    "validator": {
+      "id": "test-validator",
+      "type": "validation",
+      "specialization": "Testing, Verification, Quality assurance",
+      "capabilities": [
+        "test-execution",
+        "result-validation",
+        "quality-assurance",
+        "error-detection",
+        "compliance-checking"
+      ],
+      "resources": {
+        "cpu": 1,
+        "memory": "2GB",
+        "storage": "5GB"
+      }
+    }
+  },
+  "testWorkflows": {
+    "coordination-test": {
+      "description": "Test multi-agent coordination capabilities",
+      "phases": [
+        {
+          "name": "initialization",
+          "agents": ["coordinator", "analyst", "executor", "validator"],
+          "tasks": ["agent-registration", "capability-exchange", "communication-test"],
+          "parallel": true,
+          "timeout": 30000
+        },
+        {
+          "name": "collaboration",
+          "agents": ["analyst", "executor"],
+          "tasks": ["collaborative-problem-solving", "task-delegation"],
+          "parallel": false,
+          "timeout": 60000
+        },
+        {
+          "name": "validation",
+          "agents": ["validator"],
+          "tasks": ["result-verification", "quality-check"],
+          "parallel": false,
+          "timeout": 30000
+        }
+      ],
+      "success_criteria": [
+        "all_agents_online",
+        "communication_established",
+        "tasks_completed_successfully",
+        "no_critical_errors"
+      ]
+    },
+    "consensus-test": {
+      "description": "Test consensus decision making",
+      "phases": [
+        {
+          "name": "proposal",
+          "agents": ["analyst"],
+          "tasks": ["create-proposal"],
+          "parallel": false,
+          "timeout": 30000
+        },
+        {
+          "name": "voting",
+          "agents": ["coordinator", "analyst", "executor", "validator"],
+          "tasks": ["cast-vote"],
+          "parallel": true,
+          "timeout": 60000
+        },
+        {
+          "name": "execution",
+          "agents": ["executor"],
+          "tasks": ["execute-decision"],
+          "parallel": false,
+          "timeout": 120000
+        }
+      ],
+      "success_criteria": [
+        "consensus_reached",
+        "decision_executed",
+        "all_agents_participated"
+      ]
+    },
+    "stress-test": {
+      "description": "Test system under load",
+      "phases": [
+        {
+          "name": "load-generation",
+          "agents": ["coordinator"],
+          "tasks": ["generate-high-load"],
+          "parallel": false,
+          "timeout": 180000
+        }
+      ],
+      "success_criteria": [
+        "system_stable_under_load",
+        "no_message_loss",
+        "response_time_acceptable"
+      ]
+    }
+  },
+  "monitoring": {
+    "metrics": [
+      "message_throughput",
+      "agent_response_time",
+      "consensus_time",
+      "error_rate",
+      "system_resource_usage"
+    ],
+    "alerting": {
+      "enabled": true,
+      "thresholds": {
+        "max_response_time": 5000,
+        "max_error_rate": 0.05,
+        "min_agent_uptime": 0.95
+      }
+    }
+  },
+  "logging": {
+    "level": "debug",
+    "destinations": ["console", "file"],
+    "file_path": "/home/avi/projects/ultimate/hive-test-spawn/logs/test-spawn.log",
+    "rotation": {
+      "enabled": true,
+      "max_size": "100MB",
+      "max_files": 5
+    }
+  }
+}

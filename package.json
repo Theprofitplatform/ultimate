@@ -1,0 +1,61 @@
+{
+  "name": "ultimate-seo-platform",
+  "version": "1.0.0",
+  "description": "Ultimate SEO Management Platform with Google Workspace Integration",
+  "main": "index.js",
+  "scripts": {
+    "hive:start": "cd hive && ./start-hive.sh",
+    "hive:stop": "cd hive && ./stop-hive.sh",
+    "hive:status": "cd hive && ./hive-status.sh",
+    "hive:logs": "tail -f hive/logs/*.log",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "cd apps/api && npm run dev",
+    "dev:web": "cd apps/web && npm run dev",
+    "build": "npm run build:api && npm run build:web",
+    "build:api": "cd apps/api && npm run build",
+    "build:web": "cd apps/web && npm run build",
+    "test": "node test-simple.js",
+    "test:api": "echo 'API tests not configured yet'",
+    "test:web": "echo 'Web tests not configured yet'",
+    "install:all": "npm install && cd apps/api && npm install && cd ../web && npm install",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "db:migrate": "cd apps/api && npm run migrate",
+    "db:seed": "cd apps/api && npm run seed"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/theprofitplatform/ultimate.git"
+  },
+  "keywords": [
+    "seo",
+    "google",
+    "workspace",
+    "saas",
+    "multi-tenant",
+    "hive",
+    "distributed"
+  ],
+  "author": "The Profit Platform",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "nodemon": "^3.0.1"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "natural": "^8.1.0",
+    "redis": "^4.6.7",
+    "uuid": "^9.0.0",
+    "ws": "^8.13.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

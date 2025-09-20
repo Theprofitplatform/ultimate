@@ -1,0 +1,93 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Environment
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Cache
+.npm
+.eslintcache
+.stylelintcache
+.cache/
+.parcel-cache
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
+.DS_Store
+
+# Testing
+coverage/
+.nyc_output/
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+
+# Temporary
+tmp/
+temp/
+.tmp/
+
+# Hive
+hive/pids/
+hive/logs/*.log
+hive/logs/*.error.log
+
+# Backups
+backups/
+*.backup
+*.sql.gz
+
+# Secrets
+*.pem
+*.key
+*.crt
+*.p12
+credentials.json
+google-credentials.json
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+
+# Misc
+*.pid
+*.seed
+*.pid.lock

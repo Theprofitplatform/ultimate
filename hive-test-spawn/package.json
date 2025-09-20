@@ -1,0 +1,41 @@
+{
+  "name": "hive-test-spawn",
+  "version": "1.0.0",
+  "description": "Test spawn instance of Hive multi-agent system with claude-flow architecture",
+  "main": "test-coordinator.js",
+  "scripts": {
+    "start": "node test-coordinator.js",
+    "spawn": "./spawn-test-hive.sh",
+    "test": "node tests/run-tests.js",
+    "coordinator": "node test-coordinator.js",
+    "analyst": "node agents/test-analyst.js",
+    "executor": "node agents/test-executor.js",
+    "validator": "node agents/test-validator.js",
+    "all-agents": "concurrently \"npm run coordinator\" \"npm run analyst\" \"npm run executor\" \"npm run validator\"",
+    "stop": "pkill -f 'node.*test-'",
+    "status": "ps aux | grep 'node.*test-'",
+    "logs": "tail -f logs/test-spawn.log"
+  },
+  "keywords": [
+    "hive",
+    "multi-agent",
+    "claude-flow", 
+    "coordination",
+    "distributed-system",
+    "test-spawn"
+  ],
+  "author": "The Profit Platform",
+  "license": "MIT",
+  "dependencies": {
+    "redis": "^4.6.0",
+    "express": "^4.18.0",
+    "ws": "^8.16.0",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
