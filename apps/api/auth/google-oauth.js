@@ -491,7 +491,7 @@ class GoogleOAuthService {
       }
 
       const tokens = userResult.rows[0].google_tokens;
-      
+
       // Check if tokens are expired
       if (tokens.expiry_date && tokens.expiry_date < Date.now()) {
         // Try to refresh tokens
@@ -506,11 +506,141 @@ class GoogleOAuthService {
       return true;
 
     } catch (error) {
-      this.logger?.error('Google token validation failed', { 
+      this.logger?.error('Google token validation failed', {
         error: error.message,
         userId
       });
       return false;
+    }
+  }
+
+  /**
+   * Get Google Analytics accounts
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} Analytics accounts
+   */
+  async getAnalyticsAccounts(userId) {
+    try {
+      const tokens = await this.refreshGoogleTokens(userId);
+      this.oauth2Client.setCredentials(tokens);
+
+      const analytics = google.analytics({ version: 'v3', auth: this.oauth2Client });
+
+      const response = await analytics.management.accounts.list();
+
+      this.logger?.info('Google Analytics accounts retrieved', {
+        userId,
+        accountCount: response.data.items?.length || 0
+      });
+
+      return response.data.items || [];
+
+    } catch (error) {
+      this.logger?.error('Google Analytics accounts fetch failed', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get Search Console sites
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} Search Console sites
+   */
+  async getSearchConsoleSites(userId) {
+    try {
+      const tokens = await this.refreshGoogleTokens(userId);
+      this.oauth2Client.setCredentials(tokens);
+
+      const searchconsole = google.searchconsole({ version: 'v1', auth: this.oauth2Client });
+
+      const response = await searchconsole.sites.list();
+
+      this.logger?.info('Google Search Console sites retrieved', {
+        userId,
+        siteCount: response.data.siteEntry?.length || 0
+      });
+
+      return response.data.siteEntry || [];
+
+    } catch (error) {
+      this.logger?.error('Google Search Console sites fetch failed', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get Google account information
+   * @param {string} userId - User ID
+   * @returns {Promise<Object>} Account information
+   */
+  async getGoogleAccountInfo(userId) {
+    try {
+      const tokens = await this.refreshGoogleTokens(userId);
+      this.oauth2Client.setCredentials(tokens);
+
+      const oauth2 = google.oauth2({ version: 'v2', auth: this.oauth2Client });
+      const { data: accountInfo } = await oauth2.userinfo.get();
+
+      this.logger?.info('Google account info retrieved', {
+        userId,
+        email: accountInfo.email
+      });
+
+      return accountInfo;
+
+    } catch (error) {
+      this.logger?.error('Google account info fetch failed', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Test Google API connection
+   * @param {string} userId - User ID
+   * @returns {Promise<Object>} Connection test result
+   */
+  async testConnection(userId) {
+    try {
+      const hasTokens = await this.hasValidGoogleTokens(userId);
+
+      if (!hasTokens) {
+        return {
+          connected: false,
+          error: 'No valid Google tokens found'
+        };
+      }
+
+      // Test by getting account info
+      const accountInfo = await this.getGoogleAccountInfo(userId);
+
+      return {
+        connected: true,
+        accountInfo: {
+          email: accountInfo.email,
+          name: accountInfo.name,
+          picture: accountInfo.picture
+        }
+      };
+
+    } catch (error) {
+      this.logger?.error('Google connection test failed', {
+        error: error.message,
+        userId
+      });
+
+      return {
+        connected: false,
+        error: error.message
+      };
     }
   }
 }
@@ -532,12 +662,16 @@ class GoogleOAuthController {
    */
   initiateGoogleAuth = (req, res) => {
     try {
-      const { url, state } = this.googleOAuthService.getAuthUrl();
-      
+      const { url, state } = this.googleOAuthService.getAuthUrl({
+        include_granted_scopes: true,
+        state: req.query.return_url || 'default'
+      });
+
       // Store state in session or cookie for verification
       res.cookie('oauth_state', state, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
         maxAge: 600000 // 10 minutes
       });
 
@@ -589,7 +723,13 @@ class GoogleOAuthController {
         permissions: result.user.permissions || []
       };
 
-      const tokens = this.authService.tokenManager.generateTokenPair(tokenPayload);
+      // Use JWT service if available for enhanced token generation
+      const tokens = this.authService.jwtService ?
+        await this.authService.jwtService.generateTokenPair(tokenPayload, {
+          userAgent: req.headers['user-agent'],
+          ipAddress: SecurityUtils.getClientIP(req)
+        }) :
+        this.authService.tokenManager.generateTokenPair(tokenPayload);
 
       // Create session
       const sessionData = await this.authService.createSession(result.user.id, tokens, {
@@ -707,15 +847,151 @@ class GoogleOAuthController {
       });
 
     } catch (error) {
-      this.logger?.error('Google access revocation failed', { 
+      this.logger?.error('Google access revocation failed', {
         error: error.message,
         userId: req.user?.id
       });
-      
+
       res.status(500).json({
         success: false,
         error: 'Revocation Failed',
         message: 'Could not revoke Google access'
+      });
+    }
+  };
+
+  /**
+   * Get Google account status
+   * GET /auth/google/status
+   */
+  getGoogleStatus = async (req, res) => {
+    try {
+      const hasValidTokens = await this.googleOAuthService.hasValidGoogleTokens(req.user.id);
+
+      res.json({
+        success: true,
+        data: {
+          connected: hasValidTokens,
+          userId: req.user.id
+        }
+      });
+
+    } catch (error) {
+      this.logger?.error('Google status check failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Status Check Failed',
+        message: 'Could not check Google connection status'
+      });
+    }
+  };
+
+  /**
+   * Verify Search Console site ownership
+   * POST /auth/google/search-console/verify
+   */
+  verifySearchConsoleSite = async (req, res) => {
+    try {
+      const { siteUrl } = req.body;
+
+      if (!siteUrl) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error',
+          message: 'Site URL is required'
+        });
+      }
+
+      // Validate URL format
+      try {
+        new URL(siteUrl);
+      } catch {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error',
+          message: 'Invalid URL format'
+        });
+      }
+
+      const result = await this.googleOAuthService.verifySearchConsoleSite(
+        req.user.id,
+        siteUrl
+      );
+
+      res.json({
+        success: true,
+        data: result
+      });
+
+    } catch (error) {
+      this.logger?.error('Search Console verification failed', {
+        error: error.message,
+        userId: req.user?.id,
+        siteUrl: req.body.siteUrl
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Verification Failed',
+        message: 'Could not verify Search Console site ownership'
+      });
+    }
+  };
+
+  /**
+   * List Google Analytics accounts
+   * GET /auth/google/analytics/accounts
+   */
+  listAnalyticsAccounts = async (req, res) => {
+    try {
+      const accounts = await this.googleOAuthService.getAnalyticsAccounts(req.user.id);
+
+      res.json({
+        success: true,
+        data: accounts
+      });
+
+    } catch (error) {
+      this.logger?.error('Analytics accounts listing failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Accounts Fetch Failed',
+        message: 'Could not retrieve Google Analytics accounts'
+      });
+    }
+  };
+
+  /**
+   * List Search Console sites
+   * GET /auth/google/search-console/sites
+   */
+  listSearchConsoleSites = async (req, res) => {
+    try {
+      const sites = await this.googleOAuthService.getSearchConsoleSites(req.user.id);
+
+      res.json({
+        success: true,
+        data: sites
+      });
+
+    } catch (error) {
+      this.logger?.error('Search Console sites listing failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Sites Fetch Failed',
+        message: 'Could not retrieve Search Console sites'
       });
     }
   };

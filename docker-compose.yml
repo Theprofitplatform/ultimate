@@ -1,0 +1,288 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ultimate-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ultimate_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-ultimate_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ultimate_pass}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+      - ./database/backups:/backups
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - ultimate-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ultimate_user} -d ${POSTGRES_DB:-ultimate_dev}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ultimate-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_pass}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_pass}
+    volumes:
+      - redis_data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - ultimate-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:-redis_pass}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # API Application
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api-production
+    container_name: ultimate-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      API_PORT: ${API_PORT:-9090}
+      WS_PORT: ${WS_PORT:-9092}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ultimate_user}:${POSTGRES_PASSWORD:-ultimate_pass}@postgres:5432/${POSTGRES_DB:-ultimate_dev}
+      REDIS_URL: redis://default:${REDIS_PASSWORD:-redis_pass}@redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      JWT_SECRET: ${JWT_SECRET:-your-jwt-secret-key}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-your-encryption-key}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      SENTRY_DSN: ${SENTRY_DSN}
+      NEW_RELIC_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY}
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    ports:
+      - "${API_PORT:-9090}:9090"
+      - "${WS_PORT:-9092}:9092"
+    networks:
+      - ultimate-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Web Application
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web-production
+    container_name: ultimate-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      API_URL: ${API_URL:-http://api:9090}
+      WS_URL: ${WS_URL:-ws://api:9092}
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    networks:
+      - ultimate-network
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Background Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: ultimate-worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ultimate_user}:${POSTGRES_PASSWORD:-ultimate_pass}@postgres:5432/${POSTGRES_DB:-ultimate_dev}
+      REDIS_URL: redis://default:${REDIS_PASSWORD:-redis_pass}@redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      QUEUE_NAME: ${QUEUE_NAME:-ultimate-queue}
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - ultimate-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "/app/scripts/worker-health-check.js"]
+      interval: 60s
+      timeout: 15s
+      retries: 2
+      start_period: 90s
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: ultimate-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./ssl:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - ultimate-network
+    depends_on:
+      - web
+      - api
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring - Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ultimate-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus
+      - prometheus_data:/prometheus
+    ports:
+      - "9191:9090"
+    networks:
+      - ultimate-network
+    profiles:
+      - monitoring
+
+  # Monitoring - Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ultimate-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3001:3000"
+    networks:
+      - ultimate-network
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # Log Aggregation - Loki
+  loki:
+    image: grafana/loki:latest
+    container_name: ultimate-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki:/etc/loki
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - ultimate-network
+    profiles:
+      - monitoring
+
+  # Log Collection - Promtail
+  promtail:
+    image: grafana/promtail:latest
+    container_name: ultimate-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./monitoring/promtail:/etc/promtail
+      - ./logs:/var/log/ultimate
+      - /var/log:/var/log:ro
+    networks:
+      - ultimate-network
+    depends_on:
+      - loki
+    profiles:
+      - monitoring
+
+  # Database Backup Service
+  db-backup:
+    image: postgres:15-alpine
+    container_name: ultimate-db-backup
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-ultimate_pass}
+    volumes:
+      - ./database/backups:/backups
+      - ./scripts/backup.sh:/backup.sh
+    networks:
+      - ultimate-network
+    depends_on:
+      - postgres
+    profiles:
+      - backup
+    command: /backup.sh
+
+# Named volumes for data persistence
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+
+# Networks
+networks:
+  ultimate-network:
+    driver: bridge
+    name: ultimate-network
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

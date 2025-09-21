@@ -1,0 +1,330 @@
+version: '3.8'
+
+# Staging Environment Configuration
+# Optimized for testing and staging deployments
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: ultimate-staging-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ultimate_staging}
+      POSTGRES_USER: ${POSTGRES_USER:-ultimate_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_staging_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+      - ./database/backups:/backups
+    ports:
+      - "5432:5432"
+    networks:
+      - ultimate-staging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ultimate_user} -d ${POSTGRES_DB:-ultimate_staging}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: ultimate-staging-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - redis_staging_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - ultimate-staging
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  # API Application
+  api:
+    image: ghcr.io/theprofitplatform/ultimate/api:${VERSION:-latest}
+    container_name: ultimate-staging-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: staging
+      API_PORT: 9090
+      WS_PORT: 9092
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ultimate_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ultimate_staging}
+      REDIS_URL: redis://default:${REDIS_PASSWORD}@redis:6379
+      LOG_LEVEL: info
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_PROJECT_ID: ${GOOGLE_PROJECT_ID}
+      GOOGLE_PRIVATE_KEY: ${GOOGLE_PRIVATE_KEY}
+      GOOGLE_CLIENT_EMAIL: ${GOOGLE_CLIENT_EMAIL}
+      SENTRY_DSN: ${SENTRY_DSN}
+      CORS_ORIGIN: https://test.theprofitplatform.com.au
+      ENABLE_SWAGGER: true
+      ENABLE_MORGAN_LOGGING: true
+    volumes:
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+    ports:
+      - "9090:9090"
+      - "9092:9092"
+    networks:
+      - ultimate-staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  # Web Application
+  web:
+    image: ghcr.io/theprofitplatform/ultimate/web:${VERSION:-latest}
+    container_name: ultimate-staging-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: staging
+      API_URL: https://test.theprofitplatform.com.au/api
+      WS_URL: wss://test.theprofitplatform.com.au/ws
+    ports:
+      - "3000:80"
+    networks:
+      - ultimate-staging
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  # Background Worker
+  worker:
+    image: ghcr.io/theprofitplatform/ultimate/api:${VERSION:-latest}
+    container_name: ultimate-staging-worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: staging
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ultimate_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ultimate_staging}
+      REDIS_URL: redis://default:${REDIS_PASSWORD}@redis:6379
+      LOG_LEVEL: info
+      WORKER_CONCURRENCY: 3
+      QUEUE_NAME: ultimate-staging-queue
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - ultimate-staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["npm", "run", "worker"]
+    healthcheck:
+      test: ["CMD", "node", "/app/scripts/worker-health-check.js"]
+      interval: 60s
+      timeout: 15s
+      retries: 2
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: ultimate-staging-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx/staging.conf:/etc/nginx/conf.d/default.conf
+      - ./ssl/staging:/etc/nginx/ssl
+      - ./logs/nginx:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - ultimate-staging
+    depends_on:
+      - web
+      - api
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+
+  # Monitoring - Prometheus (Optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ultimate-staging-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=72h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus/staging.yml:/etc/prometheus/prometheus.yml
+      - prometheus_staging_data:/prometheus
+    ports:
+      - "9191:9090"
+    networks:
+      - ultimate-staging
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  # Log Aggregation - Loki (Optional)
+  loki:
+    image: grafana/loki:latest
+    container_name: ultimate-staging-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./monitoring/loki/staging.yml:/etc/loki/local-config.yaml
+      - loki_staging_data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - ultimate-staging
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  # Database Backup Service
+  db-backup:
+    image: postgres:15-alpine
+    container_name: ultimate-staging-backup
+    restart: "no"
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_USER:-ultimate_user}
+      POSTGRES_DB: ${POSTGRES_DB:-ultimate_staging}
+      BACKUP_SCHEDULE: "0 3 * * *"
+      BACKUP_RETENTION: "7"
+    volumes:
+      - ./database/backups:/backups
+      - ./scripts/backup-staging.sh:/backup.sh
+    networks:
+      - ultimate-staging
+    depends_on:
+      - postgres
+    profiles:
+      - backup
+    command: /backup.sh
+
+  # Testing Service (for staging tests)
+  test-runner:
+    image: ghcr.io/theprofitplatform/ultimate/api:${VERSION:-latest}
+    container_name: ultimate-staging-tests
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ultimate_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-ultimate_staging}
+      REDIS_URL: redis://default:${REDIS_PASSWORD}@redis:6379
+      API_URL: http://api:9090
+      WEB_URL: http://web
+    volumes:
+      - ./tests:/app/tests
+      - ./test-results:/app/test-results
+    networks:
+      - ultimate-staging
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    profiles:
+      - testing
+    command: ["npm", "run", "test:staging"]
+
+# Named volumes for data persistence
+volumes:
+  postgres_staging_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/ultimate-staging/postgres
+  redis_staging_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /var/lib/ultimate-staging/redis
+  prometheus_staging_data:
+    driver: local
+  loki_staging_data:
+    driver: local
+
+# Networks
+networks:
+  ultimate-staging:
+    driver: bridge
+    name: ultimate-staging
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

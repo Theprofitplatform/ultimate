@@ -4,15 +4,19 @@
  */
 
 const { SecurityUtils } = require('./auth.utils');
+const { RBACService } = require('./rbac');
+const SessionService = require('./session.service');
 
 /**
  * Authentication Controller Class
  * Handles HTTP requests for authentication endpoints
  */
 class AuthController {
-  constructor(authService, logger) {
+  constructor(authService, logger, rbacService = null, sessionService = null) {
     this.authService = authService;
     this.logger = logger;
+    this.rbacService = rbacService || new RBACService(authService.db, logger);
+    this.sessionService = sessionService;
   }
 
   /**
@@ -509,8 +513,15 @@ class AuthController {
    */
   getSessions = async (req, res) => {
     try {
-      // This would require an additional method in AuthService
-      const sessions = await this.authService.getUserSessions(req.user.id);
+      let sessions;
+
+      if (this.sessionService) {
+        // Use Redis-based session service
+        sessions = await this.sessionService.getUserSessions(req.user.id);
+      } else {
+        // Fallback to database sessions
+        sessions = await this.authService.getUserSessions(req.user.id);
+      }
 
       res.json({
         success: true,
@@ -518,7 +529,7 @@ class AuthController {
       });
 
     } catch (error) {
-      this.logger?.error('Get sessions failed', { 
+      this.logger?.error('Get sessions failed', {
         error: error.message,
         userId: req.user?.id
       });
@@ -656,6 +667,382 @@ class AuthController {
         success: false,
         error: 'Resend Failed',
         message: 'An error occurred while resending verification email'
+      });
+    }
+  };
+
+  /**
+   * Verify JWT token endpoint
+   * GET /auth/verify
+   */
+  verifyToken = async (req, res) => {
+    try {
+      // Token is already verified by middleware
+      // Return user information
+      const profile = await this.authService.getUserProfile(req.user.id);
+
+      res.json({
+        success: true,
+        valid: true,
+        user: profile
+      });
+
+    } catch (error) {
+      this.logger?.error('Token verification failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Verification Failed',
+        message: 'An error occurred during token verification'
+      });
+    }
+  };
+
+  /**
+   * Get user permissions endpoint
+   * GET /auth/permissions
+   */
+  getPermissions = async (req, res) => {
+    try {
+      const permissions = this.rbacService.getEffectivePermissions(req.user);
+      const roleInfo = this.rbacService.constructor.ROLES[req.user.role?.toUpperCase()];
+
+      res.json({
+        success: true,
+        data: {
+          permissions,
+          role: roleInfo || { name: req.user.role, level: 0 },
+          effectivePermissions: permissions.length
+        }
+      });
+
+    } catch (error) {
+      this.logger?.error('Get permissions failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Permissions Fetch Failed',
+        message: 'An error occurred while fetching permissions'
+      });
+    }
+  };
+
+  /**
+   * Revoke all sessions endpoint
+   * POST /auth/sessions/revoke-all
+   */
+  revokeAllSessions = async (req, res) => {
+    try {
+      const { excludeCurrent = true } = req.body;
+      const excludeSessionId = excludeCurrent ? req.user.sessionId : null;
+
+      let revokedCount;
+      if (this.sessionService) {
+        revokedCount = await this.sessionService.destroyAllUserSessions(
+          req.user.id,
+          excludeSessionId
+        );
+      } else {
+        // Fallback implementation
+        revokedCount = await this.authService.revokeAllUserSessions(
+          req.user.id,
+          excludeSessionId
+        );
+      }
+
+      res.json({
+        success: true,
+        message: `${revokedCount} sessions revoked successfully`,
+        revokedCount
+      });
+
+    } catch (error) {
+      this.logger?.error('Revoke all sessions failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Session Revocation Failed',
+        message: 'An error occurred while revoking sessions'
+      });
+    }
+  };
+
+  /**
+   * Generate API key endpoint
+   * POST /auth/api-keys
+   */
+  generateApiKey = async (req, res) => {
+    try {
+      const { name, permissions = [], expiresIn } = req.body;
+
+      if (!name) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error',
+          message: 'API key name is required'
+        });
+      }
+
+      // Check if user has permission to create API keys
+      if (!this.rbacService.hasPermission(req.user, 'api_key:write')) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden',
+          message: 'Insufficient permissions to create API keys'
+        });
+      }
+
+      const apiKey = await this.authService.generateApiKey({
+        name: SecurityUtils.sanitizeInput(name),
+        permissions,
+        userId: req.user.id,
+        organizationId: req.user.organizationId,
+        expiresIn
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'API key generated successfully',
+        data: apiKey
+      });
+
+    } catch (error) {
+      this.logger?.error('API key generation failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'API Key Generation Failed',
+        message: 'An error occurred while generating API key'
+      });
+    }
+  };
+
+  /**
+   * List API keys endpoint
+   * GET /auth/api-keys
+   */
+  listApiKeys = async (req, res) => {
+    try {
+      // Check if user has permission to read API keys
+      if (!this.rbacService.hasPermission(req.user, 'api_key:read')) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden',
+          message: 'Insufficient permissions to view API keys'
+        });
+      }
+
+      const apiKeys = await this.authService.getUserApiKeys(req.user.id);
+
+      res.json({
+        success: true,
+        data: apiKeys
+      });
+
+    } catch (error) {
+      this.logger?.error('API key listing failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'API Key Listing Failed',
+        message: 'An error occurred while fetching API keys'
+      });
+    }
+  };
+
+  /**
+   * Revoke API key endpoint
+   * DELETE /auth/api-keys/:keyId
+   */
+  revokeApiKey = async (req, res) => {
+    try {
+      const { keyId } = req.params;
+
+      if (!keyId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error',
+          message: 'API key ID is required'
+        });
+      }
+
+      // Check if user has permission to delete API keys
+      if (!this.rbacService.hasPermission(req.user, 'api_key:delete')) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden',
+          message: 'Insufficient permissions to revoke API keys'
+        });
+      }
+
+      const success = await this.authService.revokeApiKey(keyId, req.user.id);
+
+      if (!success) {
+        return res.status(404).json({
+          success: false,
+          error: 'Not Found',
+          message: 'API key not found or access denied'
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'API key revoked successfully'
+      });
+
+    } catch (error) {
+      this.logger?.error('API key revocation failed', {
+        error: error.message,
+        userId: req.user?.id,
+        keyId: req.params.keyId
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'API Key Revocation Failed',
+        message: 'An error occurred while revoking API key'
+      });
+    }
+  };
+
+  /**
+   * Get session statistics endpoint
+   * GET /auth/sessions/stats
+   */
+  getSessionStats = async (req, res) => {
+    try {
+      let stats;
+
+      if (this.sessionService) {
+        stats = await this.sessionService.getSessionStats(req.user.id);
+      } else {
+        // Fallback stats from database
+        stats = await this.authService.getSessionStats(req.user.id);
+      }
+
+      res.json({
+        success: true,
+        data: stats
+      });
+
+    } catch (error) {
+      this.logger?.error('Get session stats failed', {
+        error: error.message,
+        userId: req.user?.id
+      });
+
+      res.status(500).json({
+        success: false,
+        error: 'Stats Fetch Failed',
+        message: 'An error occurred while fetching session statistics'
+      });
+    }
+  };
+
+  /**
+   * User login with device tracking
+   * Enhanced version with session service integration
+   */
+  loginWithSession = async (req, res) => {
+    try {
+      const { email, password, rememberMe = false } = req.body;
+
+      // Input validation
+      if (!email || !password) {
+        return res.status(400).json({
+          success: false,
+          error: 'Validation Error',
+          message: 'Email and password are required'
+        });
+      }
+
+      const loginInfo = {
+        ipAddress: SecurityUtils.getClientIP(req),
+        userAgent: req.headers['user-agent'] || 'Unknown'
+      };
+
+      const result = await this.authService.login(
+        SecurityUtils.sanitizeInput(email),
+        password,
+        loginInfo
+      );
+
+      // Create session if session service is available
+      if (this.sessionService) {
+        const sessionData = await this.sessionService.createSession({
+          userId: result.user.id,
+          organizationId: result.user.organization.id,
+          email: result.user.email,
+          role: result.user.role,
+          permissions: result.user.permissions,
+          ipAddress: loginInfo.ipAddress,
+          userAgent: loginInfo.userAgent,
+          tokenIds: result.tokens
+        });
+
+        result.sessionId = sessionData.sessionId;
+      }
+
+      // Set HTTP-only cookie for refresh token if remember me is enabled
+      if (rememberMe) {
+        res.cookie('refreshToken', result.tokens.refreshToken, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === 'production',
+          sameSite: 'strict',
+          maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'Login successful',
+        data: {
+          user: result.user,
+          tokens: {
+            accessToken: result.tokens.accessToken,
+            tokenType: result.tokens.tokenType,
+            expiresIn: result.tokens.expiresIn
+          },
+          sessionId: result.sessionId
+        }
+      });
+
+    } catch (error) {
+      this.logger?.error('Login with session failed', {
+        error: error.message,
+        email: req.body.email,
+        ip: SecurityUtils.getClientIP(req)
+      });
+
+      if (error.message.includes('Invalid email') ||
+          error.message.includes('Password not set') ||
+          error.message.includes('subscription has expired')) {
+        return res.status(401).json({
+          success: false,
+          error: 'Authentication Failed',
+          message: error.message
+        });
+      }
+
+      res.status(500).json({
+        success: false,
+        error: 'Login Failed',
+        message: 'An error occurred during login'
       });
     }
   };

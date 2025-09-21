@@ -7,16 +7,18 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const { TokenManager, PasswordManager, SecurityUtils } = require('./auth.utils');
+const JWTService = require('./jwt.service');
 
 /**
  * Authentication Service Class
  * Handles all authentication-related business logic
  */
 class AuthService {
-  constructor(dbPool, logger) {
+  constructor(dbPool, logger, jwtService = null) {
     this.db = dbPool;
     this.logger = logger;
     this.tokenManager = new TokenManager();
+    this.jwtService = jwtService || new JWTService(logger);
   }
 
   /**
@@ -176,7 +178,7 @@ class AuthService {
         throw new Error('Organization subscription has expired');
       }
 
-      // Generate tokens
+      // Generate tokens using enhanced JWT service if available
       const tokenPayload = {
         user_id: user.id,
         organization_id: user.organization_id,
@@ -185,7 +187,12 @@ class AuthService {
         permissions: user.permissions || []
       };
 
-      const tokens = this.tokenManager.generateTokenPair(tokenPayload);
+      const tokens = this.jwtService ?
+        await this.jwtService.generateTokenPair(tokenPayload, {
+          userAgent: loginInfo.userAgent,
+          ipAddress: loginInfo.ipAddress
+        }) :
+        this.tokenManager.generateTokenPair(tokenPayload);
 
       // Create session
       const sessionData = await this.createSession(user.id, tokens, loginInfo);
@@ -671,6 +678,247 @@ class AuthService {
       this.logger?.error('Session cleanup failed', { error: error.message });
       return 0;
     }
+  }
+
+  /**
+   * Generate API key for user
+   * @param {Object} keyData - API key data
+   * @returns {Promise<Object>} API key result
+   */
+  async generateApiKey(keyData) {
+    try {
+      const {
+        name,
+        permissions = [],
+        userId,
+        organizationId,
+        expiresIn = '365d'
+      } = keyData;
+
+      // Generate API key
+      const apiKey = SecurityUtils.generateApiKey('ak_');
+      const keyHash = SecurityUtils.hashApiKey(apiKey);
+      const keyId = uuidv4();
+
+      // Calculate expiry date
+      const expiresAt = new Date();
+      const duration = this.parseExpiry(expiresIn);
+      expiresAt.setTime(expiresAt.getTime() + duration);
+
+      // Store API key in database
+      const result = await this.db.query(
+        `INSERT INTO auth.api_keys
+         (id, name, key_hash, user_id, organization_id, permissions, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
+         RETURNING id, name, permissions, expires_at, created_at`,
+        [keyId, name, keyHash, userId, organizationId, JSON.stringify(permissions), expiresAt]
+      );
+
+      this.logger?.info('API key generated', {
+        keyId,
+        userId,
+        organizationId,
+        name
+      });
+
+      return {
+        id: result.rows[0].id,
+        name: result.rows[0].name,
+        key: apiKey, // Only return the actual key on creation
+        permissions: result.rows[0].permissions,
+        expiresAt: result.rows[0].expires_at,
+        createdAt: result.rows[0].created_at
+      };
+
+    } catch (error) {
+      this.logger?.error('API key generation failed', {
+        error: error.message,
+        userId: keyData.userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get user's API keys
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} List of API keys
+   */
+  async getUserApiKeys(userId) {
+    try {
+      const result = await this.db.query(
+        `SELECT id, name, permissions, expires_at, created_at, last_used_at, is_active
+         FROM auth.api_keys
+         WHERE user_id = $1 AND is_active = true
+         ORDER BY created_at DESC`,
+        [userId]
+      );
+
+      return result.rows.map(key => ({
+        ...key,
+        key: '***' + key.id.substring(key.id.length - 4), // Masked key
+        permissions: key.permissions || []
+      }));
+
+    } catch (error) {
+      this.logger?.error('Failed to get user API keys', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Revoke API key
+   * @param {string} keyId - API key ID
+   * @param {string} userId - User ID (for authorization)
+   * @returns {Promise<boolean>} Success status
+   */
+  async revokeApiKey(keyId, userId) {
+    try {
+      const result = await this.db.query(
+        'UPDATE auth.api_keys SET is_active = false WHERE id = $1 AND user_id = $2',
+        [keyId, userId]
+      );
+
+      if (result.rowCount === 0) {
+        return false;
+      }
+
+      this.logger?.info('API key revoked', { keyId, userId });
+      return true;
+
+    } catch (error) {
+      this.logger?.error('API key revocation failed', {
+        error: error.message,
+        keyId,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get user sessions from database
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} List of sessions
+   */
+  async getUserSessions(userId) {
+    try {
+      const result = await this.db.query(
+        `SELECT id, ip_address, user_agent, created_at, expires_at
+         FROM auth.sessions
+         WHERE user_id = $1 AND expires_at > CURRENT_TIMESTAMP
+         ORDER BY created_at DESC`,
+        [userId]
+      );
+
+      return result.rows.map(session => ({
+        id: session.id,
+        ipAddress: session.ip_address,
+        userAgent: session.user_agent,
+        createdAt: session.created_at,
+        expiresAt: session.expires_at,
+        isActive: true
+      }));
+
+    } catch (error) {
+      this.logger?.error('Failed to get user sessions', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Revoke all user sessions
+   * @param {string} userId - User ID
+   * @param {string} excludeSessionId - Session to exclude
+   * @returns {Promise<number>} Number of revoked sessions
+   */
+  async revokeAllUserSessions(userId, excludeSessionId = null) {
+    try {
+      let query = 'DELETE FROM auth.sessions WHERE user_id = $1';
+      const params = [userId];
+
+      if (excludeSessionId) {
+        query += ' AND id != $2';
+        params.push(excludeSessionId);
+      }
+
+      const result = await this.db.query(query, params);
+
+      this.logger?.info('All user sessions revoked', {
+        userId,
+        revokedCount: result.rowCount,
+        excludedSession: excludeSessionId
+      });
+
+      return result.rowCount;
+
+    } catch (error) {
+      this.logger?.error('Failed to revoke all user sessions', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get session statistics
+   * @param {string} userId - User ID
+   * @returns {Promise<Object>} Session statistics
+   */
+  async getSessionStats(userId) {
+    try {
+      const [sessionResult, loginResult] = await Promise.all([
+        this.db.query(
+          'SELECT COUNT(*) as active_sessions FROM auth.sessions WHERE user_id = $1 AND expires_at > CURRENT_TIMESTAMP',
+          [userId]
+        ),
+        this.db.query(
+          'SELECT last_login_at, created_at FROM auth.users WHERE id = $1',
+          [userId]
+        )
+      ]);
+
+      const user = loginResult.rows[0];
+
+      return {
+        userId,
+        activeSessions: parseInt(sessionResult.rows[0].active_sessions),
+        lastLoginAt: user?.last_login_at,
+        memberSince: user?.created_at
+      };
+
+    } catch (error) {
+      this.logger?.error('Failed to get session stats', {
+        error: error.message,
+        userId
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Parse expiry string to milliseconds
+   * @param {string} expiry - Expiry string (e.g., '15m', '7d')
+   * @returns {number} Milliseconds
+   * @private
+   */
+  parseExpiry(expiry) {
+    const units = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+    const match = expiry.match(/^(\d+)([smhd])$/);
+
+    if (!match) {
+      throw new Error('Invalid expiry format');
+    }
+
+    const [, value, unit] = match;
+    return parseInt(value) * units[unit];
   }
 }
 

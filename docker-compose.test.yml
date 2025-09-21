@@ -1,0 +1,327 @@
+version: '3.8'
+
+# Test Environment Configuration
+# Optimized for CI/CD testing and E2E tests
+
+services:
+  # PostgreSQL Test Database
+  postgres-test:
+    image: postgres:15-alpine
+    container_name: ultimate-test-postgres
+    restart: "no"
+    environment:
+      POSTGRES_DB: ultimate_test
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    networks:
+      - ultimate-test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testuser -d ultimate_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # Redis Test Cache
+  redis-test:
+    image: redis:7-alpine
+    container_name: ultimate-test-redis
+    restart: "no"
+    command: redis-server --appendonly no --save ""
+    ports:
+      - "6380:6379"
+    networks:
+      - ultimate-test
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # API Application for Testing
+  api-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    container_name: ultimate-test-api
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      API_PORT: 9090
+      WS_PORT: 9092
+      DATABASE_URL: postgresql://testuser:testpass@postgres-test:5432/ultimate_test
+      REDIS_URL: redis://redis-test:6379
+      LOG_LEVEL: debug
+      JWT_SECRET: test_jwt_secret_for_testing_only
+      ENCRYPTION_KEY: test_encryption_key_32_chars_min
+      GOOGLE_CLIENT_ID: test_google_client_id
+      GOOGLE_CLIENT_SECRET: test_google_client_secret
+      CORS_ORIGIN: http://localhost:3000
+      CI: true
+    volumes:
+      - ./tests:/app/tests
+      - ./test-results:/app/test-results
+      - ./coverage:/app/coverage
+    ports:
+      - "9090:9090"
+      - "9092:9092"
+    networks:
+      - ultimate-test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Web Application for Testing
+  web-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    container_name: ultimate-test-web
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      API_URL: http://api-test:9090
+      WS_URL: ws://api-test:9092
+      CI: true
+    volumes:
+      - ./tests:/app/tests
+      - ./test-results:/app/test-results
+      - ./coverage:/app/coverage
+    ports:
+      - "3000:3000"
+    networks:
+      - ultimate-test
+    depends_on:
+      api-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # E2E Test Runner
+  e2e-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    container_name: ultimate-e2e-tests
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      API_URL: http://api-test:9090
+      WEB_URL: http://web-test:3000
+      DATABASE_URL: postgresql://testuser:testpass@postgres-test:5432/ultimate_test
+      REDIS_URL: redis://redis-test:6379
+      PLAYWRIGHT_BROWSERS_PATH: /app/browsers
+      CI: true
+    volumes:
+      - ./tests:/app/tests
+      - ./test-results:/app/test-results
+      - ./playwright-report:/app/playwright-report
+      - playwright_cache:/app/browsers
+    networks:
+      - ultimate-test
+    depends_on:
+      api-test:
+        condition: service_healthy
+      web-test:
+        condition: service_healthy
+    profiles:
+      - e2e
+    command: ["npm", "run", "test:e2e"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # Performance Test Runner
+  performance-tests:
+    image: grafana/k6:latest
+    container_name: ultimate-performance-tests
+    restart: "no"
+    environment:
+      API_URL: http://api-test:9090
+      WEB_URL: http://web-test:3000
+    volumes:
+      - ./tests/performance:/scripts
+      - ./test-results:/results
+    networks:
+      - ultimate-test
+    depends_on:
+      api-test:
+        condition: service_healthy
+      web-test:
+        condition: service_healthy
+    profiles:
+      - performance
+    command: ["run", "/scripts/load-test.js"]
+
+  # Security Test Scanner
+  security-scanner:
+    image: owasp/zap2docker-stable
+    container_name: ultimate-security-scanner
+    restart: "no"
+    environment:
+      ZAP_PROXY: "0.0.0.0:8080"
+    volumes:
+      - ./test-results/security:/zap/wrk
+    networks:
+      - ultimate-test
+    depends_on:
+      api-test:
+        condition: service_healthy
+      web-test:
+        condition: service_healthy
+    profiles:
+      - security
+    command: >
+      zap-baseline.py
+      -t http://web-test:3000
+      -J security-report.json
+      -H security-report.html
+      -z "-configfile /zap/wrk/zap.conf"
+
+  # Database Migration Tester
+  migration-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    container_name: ultimate-migration-test
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://testuser:testpass@postgres-test:5432/ultimate_test
+    volumes:
+      - ./database:/app/database
+      - ./test-results:/app/test-results
+    networks:
+      - ultimate-test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    profiles:
+      - migration
+    command: ["npm", "run", "test:migrations"]
+
+  # Test Data Seeder
+  test-seeder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    container_name: ultimate-test-seeder
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://testuser:testpass@postgres-test:5432/ultimate_test
+      REDIS_URL: redis://redis-test:6379
+    volumes:
+      - ./database/seeds:/app/seeds
+      - ./test-data:/app/test-data
+    networks:
+      - ultimate-test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+    profiles:
+      - seeding
+    command: ["npm", "run", "db:seed:test"]
+
+  # Test Results Collector
+  test-results:
+    image: nginx:alpine
+    container_name: ultimate-test-results
+    restart: "no"
+    volumes:
+      - ./test-results:/usr/share/nginx/html
+      - ./tests/nginx-test.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "8080:80"
+    networks:
+      - ultimate-test
+    profiles:
+      - results
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Test Cleanup Service
+  cleanup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: test
+    container_name: ultimate-test-cleanup
+    restart: "no"
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://testuser:testpass@postgres-test:5432/ultimate_test
+      REDIS_URL: redis://redis-test:6379
+    volumes:
+      - ./scripts:/app/scripts
+      - ./test-results:/app/test-results
+    networks:
+      - ultimate-test
+    depends_on:
+      - postgres-test
+      - redis-test
+    profiles:
+      - cleanup
+    command: ["./scripts/test-cleanup.sh"]
+
+# Named volumes for test data
+volumes:
+  postgres_test_data:
+    driver: local
+  playwright_cache:
+    driver: local
+
+# Test network
+networks:
+  ultimate-test:
+    driver: bridge
+    name: ultimate-test
+    ipam:
+      config:
+        - subnet: 172.23.0.0/16

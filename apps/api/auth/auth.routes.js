@@ -4,9 +4,26 @@
  */
 
 const express = require('express');
-const { body, param, query } = require('express-validator');
 const { RateLimiter } = require('./auth.utils');
 const { AuthMiddleware, PERMISSIONS, ROLES } = require('./auth.middleware');
+const {
+  validateRegistration,
+  validateLogin,
+  validateTokenRefresh,
+  validateEmailVerification,
+  validatePasswordResetRequest,
+  validatePasswordReset,
+  validatePasswordChange,
+  validateProfileUpdate,
+  validateApiKeyGeneration,
+  validateSessionId,
+  validateUserId,
+  validateGoogleCallback,
+  validateAnalyticsQuery,
+  validateSearchConsoleQuery,
+  sanitizeInputs,
+  validateCSP
+} = require('./validation.middleware');
 
 /**
  * Create authentication routes
@@ -22,6 +39,8 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
 
   // Apply security middleware
   router.use(authMiddleware.securityHeaders);
+  router.use(validateCSP);
+  router.use(sanitizeInputs);
   router.use(authMiddleware.requestLogger);
 
   // ============================================
@@ -40,24 +59,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.post('/register',
     RateLimiter.registrationLimiter,
-    [
-      body('email')
-        .isEmail()
-        .normalizeEmail()
-        .withMessage('Valid email is required'),
-      body('password')
-        .isLength({ min: 8 })
-        .withMessage('Password must be at least 8 characters long'),
-      body('fullName')
-        .trim()
-        .isLength({ min: 2, max: 100 })
-        .withMessage('Full name must be between 2 and 100 characters'),
-      body('organizationName')
-        .optional()
-        .trim()
-        .isLength({ min: 2, max: 100 })
-        .withMessage('Organization name must be between 2 and 100 characters')
-    ],
+    validateRegistration,
     authController.register
   );
 
@@ -67,19 +69,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.post('/login',
     RateLimiter.authLimiter,
-    [
-      body('email')
-        .isEmail()
-        .normalizeEmail()
-        .withMessage('Valid email is required'),
-      body('password')
-        .notEmpty()
-        .withMessage('Password is required'),
-      body('rememberMe')
-        .optional()
-        .isBoolean()
-        .withMessage('Remember me must be a boolean')
-    ],
+    validateLogin,
     authController.login
   );
 
@@ -88,12 +78,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    * POST /auth/refresh
    */
   router.post('/refresh',
-    [
-      body('refreshToken')
-        .optional()
-        .isString()
-        .withMessage('Refresh token must be a string')
-    ],
+    validateTokenRefresh,
     authController.refreshToken
   );
 
@@ -102,12 +87,17 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    * POST /auth/verify-email
    */
   router.post('/verify-email',
-    [
-      body('token')
-        .notEmpty()
-        .withMessage('Verification token is required')
-    ],
+    validateEmailVerification,
     authController.verifyEmail
+  );
+
+  /**
+   * Alternative endpoint for token verification
+   * GET /auth/verify
+   */
+  router.get('/verify',
+    authMiddleware.authenticate,
+    authController.verifyToken
   );
 
   /**
@@ -116,12 +106,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.post('/forgot-password',
     RateLimiter.passwordResetLimiter,
-    [
-      body('email')
-        .isEmail()
-        .normalizeEmail()
-        .withMessage('Valid email is required')
-    ],
+    validatePasswordResetRequest,
     authController.forgotPassword
   );
 
@@ -130,14 +115,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    * POST /auth/reset-password
    */
   router.post('/reset-password',
-    [
-      body('token')
-        .notEmpty()
-        .withMessage('Reset token is required'),
-      body('newPassword')
-        .isLength({ min: 8 })
-        .withMessage('New password must be at least 8 characters long')
-    ],
+    validatePasswordReset,
     authController.resetPassword
   );
 
@@ -156,16 +134,17 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    * POST /auth/google/callback
    */
   router.post('/google/callback',
-    [
-      body('code')
-        .notEmpty()
-        .withMessage('Authorization code is required'),
-      body('state')
-        .optional()
-        .isString()
-        .withMessage('State must be a string')
-    ],
+    validateGoogleCallback,
     googleOAuthController.handleGoogleCallback
+  );
+
+  /**
+   * Get Google connection status
+   * GET /auth/google/status
+   */
+  router.get('/google/status',
+    authMiddleware.optionalAuthenticate,
+    googleOAuthController.getGoogleStatus
   );
 
   // ============================================
@@ -205,17 +184,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.put('/profile',
     authMiddleware.authenticate,
-    [
-      body('fullName')
-        .optional()
-        .trim()
-        .isLength({ min: 2, max: 100 })
-        .withMessage('Full name must be between 2 and 100 characters'),
-      body('avatarUrl')
-        .optional()
-        .isURL()
-        .withMessage('Avatar URL must be a valid URL')
-    ],
+    validateProfileUpdate,
     authController.updateProfile
   );
 
@@ -225,14 +194,7 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.post('/change-password',
     authMiddleware.authenticate,
-    [
-      body('currentPassword')
-        .notEmpty()
-        .withMessage('Current password is required'),
-      body('newPassword')
-        .isLength({ min: 8 })
-        .withMessage('New password must be at least 8 characters long')
-    ],
+    validatePasswordChange,
     authController.changePassword
   );
 
@@ -260,12 +222,26 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.delete('/sessions/:sessionId',
     authMiddleware.authenticate,
-    [
-      param('sessionId')
-        .isUUID()
-        .withMessage('Session ID must be a valid UUID')
-    ],
+    validateSessionId,
     authController.revokeSession
+  );
+
+  /**
+   * Revoke all sessions
+   * POST /auth/sessions/revoke-all
+   */
+  router.post('/sessions/revoke-all',
+    authMiddleware.authenticate,
+    authController.revokeAllSessions
+  );
+
+  /**
+   * Get session statistics
+   * GET /auth/sessions/stats
+   */
+  router.get('/sessions/stats',
+    authMiddleware.authenticate,
+    authController.getSessionStats
   );
 
   // ============================================
@@ -278,20 +254,17 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.get('/google/analytics/:viewId',
     authMiddleware.authenticate,
-    [
-      param('viewId')
-        .notEmpty()
-        .withMessage('View ID is required'),
-      query('startDate')
-        .optional()
-        .isISO8601()
-        .withMessage('Start date must be in ISO 8601 format'),
-      query('endDate')
-        .optional()
-        .isISO8601()
-        .withMessage('End date must be in ISO 8601 format')
-    ],
+    validateAnalyticsQuery,
     googleOAuthController.getAnalyticsData
+  );
+
+  /**
+   * List Google Analytics accounts
+   * GET /auth/google/analytics/accounts
+   */
+  router.get('/google/analytics/accounts',
+    authMiddleware.authenticate,
+    googleOAuthController.listAnalyticsAccounts
   );
 
   /**
@@ -300,20 +273,26 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   router.get('/google/search-console/:siteUrl',
     authMiddleware.authenticate,
-    [
-      param('siteUrl')
-        .notEmpty()
-        .withMessage('Site URL is required'),
-      query('startDate')
-        .optional()
-        .isISO8601()
-        .withMessage('Start date must be in ISO 8601 format'),
-      query('endDate')
-        .optional()
-        .isISO8601()
-        .withMessage('End date must be in ISO 8601 format')
-    ],
+    validateSearchConsoleQuery,
     googleOAuthController.getSearchConsoleData
+  );
+
+  /**
+   * List Search Console sites
+   * GET /auth/google/search-console/sites
+   */
+  router.get('/google/search-console/sites',
+    authMiddleware.authenticate,
+    googleOAuthController.listSearchConsoleSites
+  );
+
+  /**
+   * Verify Search Console site ownership
+   * POST /auth/google/search-console/verify
+   */
+  router.post('/google/search-console/verify',
+    authMiddleware.authenticate,
+    googleOAuthController.verifySearchConsoleSite
   );
 
   /**
@@ -323,6 +302,51 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
   router.delete('/google/revoke',
     authMiddleware.authenticate,
     googleOAuthController.revokeGoogleAccess
+  );
+
+  // ============================================
+  // API KEY MANAGEMENT ROUTES
+  // ============================================
+
+  /**
+   * Generate API key
+   * POST /auth/api-keys
+   */
+  router.post('/api-keys',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission(PERMISSIONS.API_KEY_WRITE),
+    validateApiKeyGeneration,
+    authController.generateApiKey
+  );
+
+  /**
+   * List API keys
+   * GET /auth/api-keys
+   */
+  router.get('/api-keys',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission(PERMISSIONS.API_KEY_READ),
+    authController.listApiKeys
+  );
+
+  /**
+   * Revoke API key
+   * DELETE /auth/api-keys/:keyId
+   */
+  router.delete('/api-keys/:keyId',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission(PERMISSIONS.API_KEY_DELETE),
+    validateUserId, // Reuse UUID validation for keyId
+    authController.revokeApiKey
+  );
+
+  /**
+   * Get user permissions
+   * GET /auth/permissions
+   */
+  router.get('/permissions',
+    authMiddleware.authenticate,
+    authController.getPermissions
   );
 
   // ============================================
@@ -360,14 +384,8 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   adminRouter.put('/users/:userId/role',
     authMiddleware.requireOrganization,
-    [
-      param('userId')
-        .isUUID()
-        .withMessage('User ID must be a valid UUID'),
-      body('role')
-        .isIn([ROLES.ADMIN, ROLES.MANAGER, ROLES.MEMBER, ROLES.VIEWER])
-        .withMessage('Invalid role specified')
-    ],
+    validateUserId,
+    authMiddleware.requireUserManagement('manage_role'),
     // This would need to be implemented in the controller
     (req, res) => {
       res.status(501).json({
@@ -384,11 +402,8 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
    */
   adminRouter.delete('/users/:userId',
     authMiddleware.requireOrganization,
-    [
-      param('userId')
-        .isUUID()
-        .withMessage('User ID must be a valid UUID')
-    ],
+    validateUserId,
+    authMiddleware.requireUserManagement('delete'),
     // This would need to be implemented in the controller
     (req, res) => {
       res.status(501).json({
@@ -425,6 +440,9 @@ function createAuthRoutes(authService, authController, googleOAuthController, lo
 
   // Apply error handling middleware
   router.use(authMiddleware.errorHandler);
+
+  // 404 handler for auth routes
+  router.use(authMiddleware.notFoundHandler);
 
   return router;
 }

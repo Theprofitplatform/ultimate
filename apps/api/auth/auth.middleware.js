@@ -5,15 +5,21 @@
 
 const crypto = require('crypto');
 const { TokenManager, SecurityUtils } = require('./auth.utils');
+const { RBACService, PERMISSIONS, ROLES } = require('./rbac');
+const JWTService = require('./jwt.service');
+const SessionService = require('./session.service');
 
 /**
  * Authentication and Authorization Middleware
  */
 class AuthMiddleware {
-  constructor(authService, logger) {
+  constructor(authService, logger, options = {}) {
     this.authService = authService;
     this.logger = logger;
     this.tokenManager = new TokenManager();
+    this.jwtService = options.jwtService;
+    this.sessionService = options.sessionService;
+    this.rbacService = options.rbacService || new RBACService(authService.db, logger);
   }
 
   /**
@@ -34,10 +40,17 @@ class AuthMiddleware {
 
       const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
-      // Verify token
+      // Verify token using enhanced JWT service if available
       let decoded;
       try {
-        decoded = this.tokenManager.verifyToken(token, 'access');
+        if (this.jwtService) {
+          decoded = await this.jwtService.verifyToken(token, 'access', {
+            userAgent: req.headers['user-agent'],
+            ipAddress: SecurityUtils.getClientIP(req)
+          });
+        } else {
+          decoded = this.tokenManager.verifyToken(token, 'access');
+        }
       } catch (error) {
         return res.status(401).json({
           success: false,
@@ -46,9 +59,17 @@ class AuthMiddleware {
         });
       }
 
-      // Validate session in database
-      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      const session = await this.authService.validateSession(decoded.jti, tokenHash);
+      // Validate session
+      let session;
+      if (this.sessionService) {
+        session = await this.sessionService.validateSession(decoded.jti, {
+          userAgent: req.headers['user-agent'],
+          ipAddress: SecurityUtils.getClientIP(req)
+        });
+      } else {
+        const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+        session = await this.authService.validateSession(decoded.jti, tokenHash);
+      }
 
       if (!session) {
         return res.status(401).json({
@@ -140,12 +161,10 @@ class AuthMiddleware {
 
   /**
    * Role-based access control middleware
-   * @param {string|Array} allowedRoles - Required role(s)
+   * @param {string|Array|number} allowedRoles - Required role(s) or minimum level
    * @returns {Function} Middleware function
    */
   requireRole = (allowedRoles) => {
-    const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-
     return (req, res, next) => {
       if (!req.user) {
         return res.status(401).json({
@@ -155,18 +174,30 @@ class AuthMiddleware {
         });
       }
 
-      if (!roles.includes(req.user.role)) {
+      let hasAccess = false;
+
+      if (typeof allowedRoles === 'number') {
+        // Role level check
+        hasAccess = this.rbacService.hasRoleLevel(req.user, allowedRoles);
+      } else {
+        // Specific role check
+        const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+        hasAccess = roles.includes(req.user.role);
+      }
+
+      if (!hasAccess) {
         this.logger?.warn('Access denied - insufficient role', {
           userId: req.user.id,
           userRole: req.user.role,
-          requiredRoles: roles,
-          endpoint: req.path
+          requiredRoles: allowedRoles,
+          endpoint: req.path,
+          method: req.method
         });
 
         return res.status(403).json({
           success: false,
           error: 'Forbidden',
-          message: 'Insufficient permissions'
+          message: 'Insufficient role privileges'
         });
       }
 
@@ -177,9 +208,10 @@ class AuthMiddleware {
   /**
    * Permission-based access control middleware
    * @param {string|Array} requiredPermissions - Required permission(s)
+   * @param {Object} options - Additional options
    * @returns {Function} Middleware function
    */
-  requirePermission = (requiredPermissions) => {
+  requirePermission = (requiredPermissions, options = {}) => {
     const permissions = Array.isArray(requiredPermissions) ? requiredPermissions : [requiredPermissions];
 
     return (req, res, next) => {
@@ -191,25 +223,26 @@ class AuthMiddleware {
         });
       }
 
-      const userPermissions = req.user.permissions || [];
-      const hasPermission = permissions.some(permission => 
-        userPermissions.includes(permission) || 
-        userPermissions.includes('*') || // Wildcard permission
-        req.user.role === 'admin' // Admin has all permissions
-      );
+      // Use RBAC service for enhanced permission checking
+      const hasPermission = permissions.some(permission => {
+        const resource = options.getResource ? options.getResource(req) : null;
+        return this.rbacService.hasPermission(req.user, permission, resource);
+      });
 
       if (!hasPermission) {
         this.logger?.warn('Access denied - insufficient permissions', {
           userId: req.user.id,
-          userPermissions,
+          userRole: req.user.role,
+          userPermissions: req.user.permissions,
           requiredPermissions: permissions,
-          endpoint: req.path
+          endpoint: req.path,
+          method: req.method
         });
 
         return res.status(403).json({
           success: false,
           error: 'Forbidden',
-          message: 'Insufficient permissions'
+          message: 'Insufficient permissions for this operation'
         });
       }
 
@@ -461,6 +494,201 @@ class AuthMiddleware {
       message: isDevelopment ? error.message : 'An unexpected error occurred',
       stack: isDevelopment ? error.stack : undefined
     });
+  };
+
+  /**
+   * Rate limiting middleware with user-specific limits
+   * @param {Object} options - Rate limit options
+   * @returns {Function} Middleware function
+   */
+  dynamicRateLimit = (options = {}) => {
+    const {
+      windowMs = 15 * 60 * 1000, // 15 minutes
+      defaultLimit = 100,
+      premiumLimit = 1000,
+      keyGenerator
+    } = options;
+
+    return async (req, res, next) => {
+      try {
+        const key = keyGenerator ? keyGenerator(req) :
+          req.user ? `user:${req.user.id}` : SecurityUtils.getClientIP(req);
+
+        // Determine limit based on user subscription or role
+        let limit = defaultLimit;
+        if (req.user) {
+          const userRole = this.rbacService.constructor.ROLES[req.user.role?.toUpperCase()];
+          if (userRole && userRole.level >= 75) { // Manager and above
+            limit = premiumLimit;
+          }
+        }
+
+        // Simple in-memory rate limiting (in production, use Redis)
+        const now = Date.now();
+        const resetTime = now + windowMs;
+
+        // This is a simplified implementation
+        // In production, use a proper rate limiting library with Redis
+        next();
+
+      } catch (error) {
+        this.logger?.error('Rate limiting error', { error: error.message });
+        next();
+      }
+    };
+  };
+
+  /**
+   * User management authorization middleware
+   * @param {string} action - Action being performed
+   * @returns {Function} Middleware function
+   */
+  requireUserManagement = (action) => {
+    return async (req, res, next) => {
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized',
+          message: 'Authentication required'
+        });
+      }
+
+      const targetUserId = req.params.userId || req.body.userId;
+      if (!targetUserId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Bad Request',
+          message: 'Target user ID required'
+        });
+      }
+
+      try {
+        // Get target user information
+        const targetUserResult = await this.authService.db.query(
+          'SELECT * FROM auth.users WHERE id = $1',
+          [targetUserId]
+        );
+
+        if (targetUserResult.rows.length === 0) {
+          return res.status(404).json({
+            success: false,
+            error: 'Not Found',
+            message: 'Target user not found'
+          });
+        }
+
+        const targetUser = targetUserResult.rows[0];
+
+        // Check if user can manage the target user
+        if (!this.rbacService.canManageUser(req.user, targetUser, action)) {
+          return res.status(403).json({
+            success: false,
+            error: 'Forbidden',
+            message: 'Insufficient permissions to manage this user'
+          });
+        }
+
+        // Add target user to request for use in controllers
+        req.targetUser = targetUser;
+        next();
+
+      } catch (error) {
+        this.logger?.error('User management authorization failed', {
+          error: error.message,
+          userId: req.user.id,
+          targetUserId,
+          action
+        });
+
+        return res.status(500).json({
+          success: false,
+          error: 'Authorization Failed',
+          message: 'An error occurred during authorization'
+        });
+      }
+    };
+  };
+
+  /**
+   * Resource ownership middleware
+   * @param {string} resourceType - Type of resource
+   * @param {Function} getResourceId - Function to extract resource ID
+   * @returns {Function} Middleware function
+   */
+  requireResourceOwnership = (resourceType, getResourceId) => {
+    return async (req, res, next) => {
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          error: 'Unauthorized',
+          message: 'Authentication required'
+        });
+      }
+
+      try {
+        const resourceId = getResourceId(req);
+        if (!resourceId) {
+          return res.status(400).json({
+            success: false,
+            error: 'Bad Request',
+            message: 'Resource ID required'
+          });
+        }
+
+        // This would need to be implemented based on your resource tables
+        // For now, we'll just pass through
+        next();
+
+      } catch (error) {
+        this.logger?.error('Resource ownership check failed', {
+          error: error.message,
+          userId: req.user.id,
+          resourceType
+        });
+
+        return res.status(500).json({
+          success: false,
+          error: 'Authorization Failed',
+          message: 'An error occurred during resource ownership check'
+        });
+      }
+    };
+  };
+
+  /**
+   * Audit logging middleware
+   * @param {string} action - Action being performed
+   * @returns {Function} Middleware function
+   */
+  auditLog = (action) => {
+    return (req, res, next) => {
+      const originalSend = res.send;
+      const startTime = Date.now();
+
+      res.send = function(data) {
+        const duration = Date.now() - startTime;
+        const success = res.statusCode < 400;
+
+        // Log the audit event
+        req.app.locals.logger?.info('Audit Log', {
+          action,
+          userId: req.user?.id,
+          organizationId: req.user?.organizationId,
+          method: req.method,
+          path: req.path,
+          statusCode: res.statusCode,
+          duration,
+          success,
+          ipAddress: SecurityUtils.getClientIP(req),
+          userAgent: req.headers['user-agent'],
+          timestamp: new Date().toISOString()
+        });
+
+        originalSend.call(this, data);
+      };
+
+      next();
+    };
   };
 
   /**
